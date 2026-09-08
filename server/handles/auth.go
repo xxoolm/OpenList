@@ -3,14 +3,17 @@ package handles
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"image/png"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
+	"gorm.io/gorm"
 )
 
 type LoginReq struct {
@@ -45,27 +48,28 @@ func loginHash(c *gin.Context, req *LoginReq) {
 	ip := c.ClientIP()
 	count, ok := model.LoginCache.Get(ip)
 	if ok && count >= model.DefaultMaxAuthRetries {
-		common.ErrorStrResp(c, "Too many unsuccessful sign-in attempts have been made using an incorrect username or password, Try again later.", 429)
+		common.ErrorStrResp(c, model.TooManyAttempts, 429)
 		model.LoginCache.Expire(ip, model.DefaultLockDuration)
 		return
 	}
 	// check username
 	user, err := op.GetUserByName(req.Username)
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorStrResp(c, model.InvalidUsernameOrPassword, 401)
 		model.LoginCache.Set(ip, count+1)
 		return
 	}
 	// validate password hash
 	if err := user.ValidatePwdStaticHash(req.Password); err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorStrResp(c, model.InvalidUsernameOrPassword, 401)
 		model.LoginCache.Set(ip, count+1)
 		return
 	}
 	// check 2FA
 	if user.OtpSecret != "" {
 		if !totp.Validate(req.OtpCode, user.OtpSecret) {
-			common.ErrorStrResp(c, "Invalid 2FA code", 402)
+			// 402 - need opt
+			common.ErrorStrResp(c, model.Invalid2FACode, 402)
 			model.LoginCache.Set(ip, count+1)
 			return
 		}
@@ -73,7 +77,7 @@ func loginHash(c *gin.Context, req *LoginReq) {
 	// generate token
 	token, err := common.GenerateToken(user)
 	if err != nil {
-		common.ErrorResp(c, err, 400, true)
+		common.ErrorResp(c, err, 500, true)
 		return
 	}
 	common.SuccessResp(c, gin.H{"token": token})
@@ -107,14 +111,32 @@ func UpdateCurrent(c *gin.Context) {
 	}
 	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user.IsGuest() {
-		common.ErrorStrResp(c, "Guest user can not update profile", 403)
+		common.ErrorStrResp(c, model.GuestCannotUpdateProfile, 403)
 		return
+	}
+	ssoID := req.SsoID
+	if req.SsoID != "" && req.SsoID != user.SsoID {
+		claims, err := parseSSOBindingToken(c, req.SsoID, ssoBindingProofPurpose)
+		if err != nil {
+			common.ErrorStrResp(c, "invalid or expired SSO binding proof", 400)
+			return
+		}
+		boundUser, err := db.GetUserBySSOID(claims.SsoID)
+		if err == nil && boundUser.ID != user.ID {
+			common.ErrorStrResp(c, "SSO account is already bound to another user", 409)
+			return
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ErrorResp(c, err, 500)
+			return
+		}
+		ssoID = claims.SsoID
 	}
 	user.Username = req.Username
 	if req.Password != "" {
 		user.SetPassword(req.Password)
 	}
-	user.SsoID = req.SsoID
+	user.SsoID = ssoID
 	if err := op.UpdateUser(user); err != nil {
 		common.ErrorResp(c, err, 500)
 	} else {
@@ -125,7 +147,7 @@ func UpdateCurrent(c *gin.Context) {
 func Generate2FA(c *gin.Context) {
 	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user.IsGuest() {
-		common.ErrorStrResp(c, "Guest user can not generate 2FA code", 403)
+		common.ErrorStrResp(c, model.GuestCannotGenerate2FA, 403)
 		return
 	}
 	key, err := totp.Generate(totp.GenerateOpts{
@@ -164,11 +186,11 @@ func Verify2FA(c *gin.Context) {
 	}
 	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user.IsGuest() {
-		common.ErrorStrResp(c, "Guest user can not generate 2FA code", 403)
+		common.ErrorStrResp(c, model.GuestCannotGenerate2FA, 403)
 		return
 	}
 	if !totp.Validate(req.Code, req.Secret) {
-		common.ErrorStrResp(c, "Invalid 2FA code", 400)
+		common.ErrorStrResp(c, model.Invalid2FACode, 400)
 		return
 	}
 	user.OtpSecret = req.Secret

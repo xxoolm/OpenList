@@ -152,7 +152,7 @@ func (d *BaiduNetdisk) postForm(pathname string, params map[string]string, form 
 
 func (d *BaiduNetdisk) getFiles(dir string) ([]File, error) {
 	start := 0
-	limit := 200
+	limit := 1000
 	params := map[string]string{
 		"method": "list",
 		"dir":    dir,
@@ -168,7 +168,6 @@ func (d *BaiduNetdisk) getFiles(dir string) ([]File, error) {
 	for {
 		params["start"] = strconv.Itoa(start)
 		params["limit"] = strconv.Itoa(limit)
-		start += limit
 		var resp ListResp
 		_, err := d.get("/xpan/file", params, &resp)
 		if err != nil {
@@ -187,6 +186,11 @@ func (d *BaiduNetdisk) getFiles(dir string) ([]File, error) {
 		} else {
 			res = append(res, resp.List...)
 		}
+
+		if len(resp.List) < limit {
+			break
+		}
+		start += limit
 	}
 	return res, nil
 }
@@ -211,11 +215,13 @@ func (d *BaiduNetdisk) linkOfficial(file model.Obj, _ model.LinkArgs) (*model.Li
 	u = res.Header().Get("location")
 	//}
 
+	exp := time.Hour
 	return &model.Link{
 		URL: u,
 		Header: http.Header{
 			"User-Agent": []string{"pan.baidu.com"},
 		},
+		Expiration: &exp,
 	}, nil
 }
 

@@ -13,7 +13,7 @@ body:
     attributes:
       label: 请确认以下事项
       description: |
-        您必须阅读并检查以下内容，否则您的问题一定会被直接关闭。
+        您必须阅读、检查、确认、同意以下内容，否则您的问题一定会被直接关闭。
         或者您可以去[讨论区](https://github.com/OpenListTeam/OpenList/discussions)。
       options:
         - label: |
@@ -35,8 +35,7 @@ body:
         - label: |
             我已确认这个问题在最新版本中没有被修复。
         - label: |
-            我没有阅读这个清单，只是闭眼选中了所有的复选框，请关闭这个 Issue
-
+            我没有阅读这个清单，只是闭眼选中了所有的复选框，请关闭这个 Issue 。
   - type: input
     id: version
     attributes:
@@ -83,3 +82,17 @@ body:
       label: 复现链接（可选）
       description: |
         请提供能复现此问题的链接。
+  - type: checkboxes
+    id: aigenerated
+    attributes:
+      label: AI生成内容
+      description: 必须且只能勾选一项，请勿删除或修改声明文字。
+      options:
+        - label: 我使用了AI工具生成此内容
+        - label: 我没有使用AI工具生成此内容
+  - type: input
+    id: ai-model
+    attributes:
+      label: AI模型是
+      description: 如果使用了AI工具，请填写模型名称；未使用则留空。
+      placeholder: xxx

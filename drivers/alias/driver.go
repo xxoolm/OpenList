@@ -229,6 +229,15 @@ func (d *Alias) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 	for _, obj := range objMap {
 		objs = append(objs, obj)
 	}
+	if d.OrderBy == "" {
+		sort := getAllSort(dirs)
+		if sort.OrderBy != "" {
+			model.SortFiles(objs, sort.OrderBy, sort.OrderDirection)
+		}
+		if d.ExtractFolder == "" && sort.ExtractFolder != "" {
+			model.ExtractFolder(objs, sort.ExtractFolder)
+		}
+	}
 	return objs, nil
 }
 
@@ -240,6 +249,7 @@ func (d *Alias) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		}
 		linkClosers := make([]io.Closer, 0, len(files))
 		rrf := make([]model.RangeReaderIF, 0, len(files))
+		requireReference := false
 		for _, f := range files {
 			link, fi, err := d.link(ctx, f.GetPath(), args)
 			if err != nil {
@@ -249,9 +259,13 @@ func (d *Alias) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				_ = link.Close()
 				continue
 			}
-			l := *link // 复制一份，避免修改到原始link
-			if l.ContentLength == 0 {
-				l.ContentLength = fi.GetSize()
+			l := &model.Link{
+				URL:           link.URL,
+				Header:        link.Header,
+				RangeReader:   link.RangeReader,
+				Concurrency:   link.Concurrency,
+				PartSize:      link.PartSize,
+				ContentLength: link.ContentLength,
 			}
 			if d.DownloadConcurrency > 0 {
 				l.Concurrency = d.DownloadConcurrency
@@ -259,44 +273,64 @@ func (d *Alias) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			if d.DownloadPartSize > 0 {
 				l.PartSize = d.DownloadPartSize * utils.KB
 			}
-			rr, err := stream.GetRangeReaderFromLink(l.ContentLength, &l)
+			if l.ContentLength == 0 {
+				l.ContentLength = fi.GetSize()
+			}
+			rr, err := stream.GetRangeReaderFromLink(l.ContentLength, l)
 			if err != nil {
 				_ = link.Close()
 				continue
 			}
 			linkClosers = append(linkClosers, link)
+			if link.RequireReference {
+				requireReference = true
+			}
 			rrf = append(rrf, rr)
 		}
 		rr := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 			return rrf[rand.Intn(len(rrf))].RangeRead(ctx, httpRange)
 		}
 		return &model.Link{
-			RangeReader: stream.RangeReaderFunc(rr),
-			SyncClosers: utils.NewSyncClosers(linkClosers...),
+			RangeReader:      stream.RangeReaderFunc(rr),
+			SyncClosers:      utils.NewSyncClosers(linkClosers...),
+			RequireReference: requireReference,
 		}, nil
 	}
 
-	reqPath := d.getBalancedPath(ctx, file)
-	link, fi, err := d.link(ctx, reqPath, args)
+	var link *model.Link
+	var fi model.Obj
+	var err error
+	files := file.(BalancedObjs)
+	if d.ReadConflictPolicy == RandomBalancedRP || d.ReadConflictPolicy == AllRWP {
+		rand.Shuffle(len(files), func(i, j int) {
+			files[i], files[j] = files[j], files[i]
+		})
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		link, fi, err = d.link(ctx, f.GetPath(), args)
+		if err == nil {
+			if link == nil {
+				// 重定向且需要通过代理
+				return &model.Link{
+					URL: fmt.Sprintf("%s/p%s?sign=%s",
+						common.GetApiUrl(ctx),
+						utils.EncodePath(f.GetPath(), true),
+						sign.Sign(f.GetPath())),
+				}, nil
+			}
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if link == nil {
-		// 重定向且需要通过代理
-		return &model.Link{
-			URL: fmt.Sprintf("%s/p%s?sign=%s",
-				common.GetApiUrl(ctx),
-				utils.EncodePath(reqPath, true),
-				sign.Sign(reqPath)),
-		}, nil
-	}
-	resultLink := *link // 复制一份，避免修改到原始link
-	resultLink.SyncClosers = utils.NewSyncClosers(link)
+	resultLink := link.Clone() // 复制一份，避免修改到原始link
+	resultLink.Expiration = nil
 	if args.Redirect {
-		return &resultLink, nil
-	}
-	if resultLink.ContentLength == 0 {
-		resultLink.ContentLength = fi.GetSize()
+		return resultLink, nil
 	}
 	if d.DownloadConcurrency > 0 {
 		resultLink.Concurrency = d.DownloadConcurrency
@@ -304,7 +338,10 @@ func (d *Alias) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if d.DownloadPartSize > 0 {
 		resultLink.PartSize = d.DownloadPartSize * utils.KB
 	}
-	return &resultLink, nil
+	if resultLink.ContentLength == 0 {
+		resultLink.ContentLength = fi.GetSize()
+	}
+	return resultLink, nil
 }
 
 func (d *Alias) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
@@ -475,9 +512,7 @@ func (d *Alias) Extract(ctx context.Context, obj model.Obj, args model.ArchiveIn
 				sign.SignArchive(reqPath)),
 		}, nil
 	}
-	resultLink := *link
-	resultLink.SyncClosers = utils.NewSyncClosers(link)
-	return &resultLink, nil
+	return link.Clone(), nil
 }
 
 func (d *Alias) ArchiveDecompress(ctx context.Context, srcObj, dstDir model.Obj, args model.ArchiveDecompressArgs) error {
